@@ -8,6 +8,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 
+from einops import rearrange, reduce, repeat
 
 def run_tokenize_prompt_and_output(
     prompt_strs: list[str],
@@ -108,7 +109,11 @@ def run_compute_group_normalized_rewards(
 
 def run_compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     """Get the entropy of the logits (i.e., entropy of the final dimension)."""
-    raise NotImplementedError
+    # logits, batch_size seq_len vocab_size
+    log_normalize_factor = torch.logsumexp(logits, dim=-1, keepdim=True)
+    log_p = logits - log_normalize_factor
+    entropy = -reduce(log_p * torch.exp(log_p), "batch_size seq_len vocab_size -> batch_size seq_len", "sum")
+    return entropy
 
 
 def run_get_response_log_probs(
