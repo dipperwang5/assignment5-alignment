@@ -6,6 +6,8 @@ from typing import Any, Callable, Literal
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
+import torch.nn.functional as F
+
 from transformers import PreTrainedTokenizerBase
 
 from einops import rearrange, reduce, repeat
@@ -145,7 +147,21 @@ def run_get_response_log_probs(
                 we have not masked out the token indices corresponding to the prompt
                 or padding; that is done in the train loop.
     """
-    raise NotImplementedError
+    with torch.no_grad():
+        outputs = model(input_ids)
+        logits = outputs.logits #batch_size seq_len vocab_size
+    log_probs = F.log_softmax(logits, dim=-1) #batch_size seq_len vocab_size
+
+    labels_unsqueeze = rearrange(labels, "batch_size seq_len -> batch_size seq_len 1")
+    log_probs_labels = torch.gather(log_probs, dim=-1, index=labels_unsqueeze)
+    log_probs_labels = rearrange(log_probs_labels, "batch_size seq_len 1 -> batch_size seq_len")
+
+    output = {"log_probs": log_probs_labels}
+    if return_token_entropy:
+        entropy = run_compute_entropy(logits)
+        output["token_entropy"] = entropy
+        
+    return output
 
 
 def run_compute_naive_policy_gradient_loss(
