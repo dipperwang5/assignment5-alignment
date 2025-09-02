@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import os
 from typing import Any, Callable, Literal
+import sys
+sys.path.append("assignment5-alignment/cs336_alignment")
+from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 import torch.nn.functional as F
 
+import pandas as pd
+import mlflow
 from transformers import PreTrainedTokenizerBase
 
 from einops import rearrange, reduce, repeat
@@ -162,6 +167,87 @@ def run_get_response_log_probs(
         output["token_entropy"] = entropy
         
     return output
+
+def log_generation(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_strs: list[str],
+    ground_truth_strs: list[str],
+    max_token_len: int = 128,
+    temp: float = 0.7,
+) -> None:
+    """
+    Generates responses from a model for given prompts and logs detailed information.
+    """
+    model.eval()
+    with torch.no_grad():
+        # tokenize the prompt for generation
+        inputs = tokenizer(prompt_strs, return_tensors="pt", padding=True, truncation=True).to(model.device)
+        prompt_token_lens = inputs["attention_mask"].sum(dim=1)
+
+        # generate the response
+        generated_ids = model.generate(
+                        input_ids=inputs["input_ids"],
+                        attention_mask=inputs["attention_mask"],
+                        max_new_tokens=max_token_len,
+                        temperature=temp,
+                        do_sample=True
+                        )        
+
+        # decode the generated responses
+        response_ids = generated_ids[:, inputs["input_ids"].shape[1]:]
+        generated_responses = tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+
+        # calculate the entropy for generated responses
+        log_prob_info = run_get_response_log_probs(model, input_ids=generated_ids, labels=generated_ids, return_token_entropy=True)
+        token_entropies = log_prob_info["token_entropy"]
+
+        generations_data = []
+        all_response_lengths, correct_response_lengths, incorrect_response_lengths = [], [], []
+
+        for i in range(len(prompt_strs)):
+            prompt = prompt_strs[i]
+            response = generated_responses[i]
+            ground_truth = ground_truth_strs[i]
+            prompt_len = prompt_token_lens[i]
+            
+            reward_info = r1_zero_reward_fn(response, ground_truth)
+            
+            response_len = len(response_ids[i])
+            response_entropies = token_entropies[i, prompt_len : prompt_len+prompt_len]
+            avg_entropy = response_entropies.mean().item() if len(response_entropies) > 0 else 0.0
+
+            # Add the row of data to our list
+            generations_data.append({
+                "Prompt": prompt,
+                "Generated Response": response,
+                "Ground Truth": ground_truth,
+                "Format Reward": reward_info["format_reward"],
+                "Answer Reward": reward_info["answer_reward"],
+                "Total Reward": reward_info["reward"],
+                "Avg Token Entropy": avg_entropy
+            })
+
+            all_response_lengths.append(response_len)
+            if reward_info["answer_reward"] > 0:
+                correct_response_lengths.append(response_len)
+            else:
+                incorrect_response_lengths.append(response_len)
+
+        # log the detailed generation data as a CSV artifact
+        df = pd.DataFrame(generations_data)
+        df.to_csv("generations.csv", index=False)
+        mlflow.log_artifact("generations.csv", artifact_path="generations")
+
+        # log the aggregate metrics
+        scalar_metrics = {
+            "avg_response_length": np.mean(all_response_lengths) if all_response_lengths else 0,
+            "avg_correct_response_length": np.mean(correct_response_lengths) if correct_response_lengths else 0,
+            "avg_incorrect_response_length": np.mean(incorrect_response_lengths) if incorrect_response_lengths else 0,
+        }
+        mlflow.log_metrics(scalar_metrics)
+
+    model.train()
 
 
 def run_compute_naive_policy_gradient_loss(
