@@ -152,9 +152,8 @@ def run_get_response_log_probs(
                 we have not masked out the token indices corresponding to the prompt
                 or padding; that is done in the train loop.
     """
-    with torch.no_grad():
-        outputs = model(input_ids)
-        logits = outputs.logits #batch_size seq_len vocab_size
+    outputs = model(input_ids)
+    logits = outputs.logits #batch_size seq_len vocab_size
     log_probs = F.log_softmax(logits, dim=-1) #batch_size seq_len vocab_size
 
     labels_unsqueeze = rearrange(labels, "batch_size seq_len -> batch_size seq_len 1")

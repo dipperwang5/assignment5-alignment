@@ -4,7 +4,7 @@ import json
 import random
 
 import sys
-sys.path.append("/home/ke_wang/assignment5-alignment/tests/adapters.py")
+sys.path.append("/home/ke_wang/assignment5-alignment/tests/")
 from adapters import (
     run_tokenize_prompt_and_output, 
     run_get_response_log_probs, 
@@ -25,7 +25,7 @@ tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
 
 n_sft_steps = 1000
 batch_size = 16
-gradient_accumulation_steps = 8
+gradient_accumulation_steps = 4
 train_data_path = "/home/ke_wang/assignment5-alignment/data/math/train.jsonl"
 
 # Note: This loads the entire dataset into memory, which may not scale to huge files.
@@ -80,5 +80,5 @@ for step in range(n_sft_steps):
         optimizer.step()
         # Zero gradients every `gradient_accumulation_steps` batches.
         optimizer.zero_grad()
-
+        
         print(f"Step {step}: Loss = {loss.item()}")
