@@ -1,73 +1,99 @@
-
-import sys
-import os
-sys.path.append("assignment5-alignment/cs336_alignment")
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from vllm import LLM, SamplingParams
+from typing import Callable, List, Tuple
+from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 import json
-import pandas as pd
+import os
+from collections import Counter
 
-os.makedirs("/home/ubuntu/kw_test/assignment5-alignment/result/eval/", exist_ok=True)
+QWEN_BASE_PATH = "models/Qwen2.5-Math-1.5B"
+# LLAMA_8B_PATH = "models/Llama-3.1-8B"
+# LLAMA_70B_PATH = "models/Llama-3.3-70B-Instruct"
 
-prompt_base = "A conversation between User and Assistant. The User asks a question, and the Assistant solves it.\
-The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer.\
-The reasoning process is enclosed within <think> </think> and answer is enclosed within <answer> </answer> tags, respectively, \
-i.e., <think> reasoning process here </think> <answer> answer here </answer>.\
-User: {question}\
-Assistant: <think>"
+def run_vllm(vllm_model, prompts, sampling_params) -> List[str]:
+    outputs = vllm_model.generate(prompts, sampling_params)
+    texts = [output.text for response in outputs for output in response.outputs]
+    return texts
 
-test_data_questions = []
-test_data_answers = []
+def evaluate_vllm(
+    vllm_model: LLM,
+    reward_fn: Callable[[str, str], dict[str, float]],
+    prompts: List[str],
+    answers: List[str],
+    eval_sampling_params: SamplingParams
+) -> None:
+    """
+    Evaluate a language model on a list of prompts,
+    compute evaluation metrics, and serialize results to disk.
+    """
+    responses = run_vllm(vllm_model, prompts, eval_sampling_params)
+    reward_dicts = [reward_fn(response, answer) for response, answer in zip(responses, answers)]
 
-with open("/home/ubuntu/kw_test/assignment5-alignment/data/math/test.jsonl", "r") as f:
-    for line in f:
-        line = json.loads(line)
-        test_data_questions.append(prompt_base.format(question=line["problem"]))
-        test_data_answers.append(line["solution"])
-        # break
+    info_dicts = reward_dicts
+    for info_dict in info_dicts:
+        info_dict["response"] = responses[info_dicts.index(info_dict)]
+        info_dict["answer"] = answers[info_dicts.index(info_dict)]
+        info_dict["prompt"] = prompts[info_dicts.index(info_dict)]
 
-print(len(test_data_questions))
-print(len(test_data_answers))
+    return info_dicts
 
-# Create a sampling params object, stopping generation on newline.
-sampling_params = SamplingParams(
-temperature=1.0, top_p=1.0, max_tokens=1024, stop=["</answer>"],
-include_stop_str_in_output=True
-)
+def load_and_format_prompts(data_path: str, prompt_path: str) -> List[str]:
+    BASE_DIR = os.path.dirname(__file__)
+    prompt_path = os.path.join(BASE_DIR, prompt_path)
+    with open(prompt_path, "r") as prompt_file:
+        prompt = prompt_file.read()
 
-# Create an LLM.
-llm = LLM(model="/home/ubuntu/kw_test/model/Qwen2.5-Math-1.5B")
+    prompts = []
+    answers = []
+    with open(data_path, "r") as data_file:
+        for line in data_file:
+            data = json.loads(line)
+            prompts.append(prompt.format(question=data["problem"]))
+            answers.append(data["answer"])
 
-# Generate texts from the prompts. The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
-outputs = llm.generate(test_data_questions, sampling_params)
+    return prompts, answers
 
-# calculate the evaluation metrics and save results
-with open("/home/ubuntu/kw_test/assignment5-alignment/result/eval/math.jsonl", "w") as f:
-    for idx, (output, question, ground_truth) in enumerate(zip(outputs, test_data_questions, test_data_answers)):
-        generated_answer = output.outputs[0].text
-        grade = r1_zero_reward_fn(generated_answer, ground_truth)
-        
-        record = {
-            "id": idx,
-            "question": question,
-            "answer": ground_truth,
-            "generated_answer": generated_answer,
-            **grade
-        }
-        f.write(json.dumps(record) + '\n')
+def build_llm_and_params(model_path: str) -> Tuple[LLM, SamplingParams]:
+    llm = LLM(model=model_path)
+    sampling_params = SamplingParams(
+        temperature=1.0, top_p=1.0, max_tokens=1024, stop=["</answer>"], include_stop_str_in_output=True
+    )
 
-# read the saved jsonl file and analysis
-df = pd.read_json("/home/ubuntu/kw_test/assignment5-alignment/result/eval/math.jsonl", lines=True)
-df_format_answer = df[(df["format_reward"] == 1.0) & (df["answer_reward"] == 1.0)]
-df_format = df[(df["format_reward"] == 1.0) & (df["answer_reward"] == 0.0)]
-df_no = df[(df["format_reward"] == 0.0) & (df["answer_reward"] == 0.0)]
+    return llm, sampling_params
 
-print(f"both format and answer correct {df_format_answer.shape[0] / df.shape[0]}")
-print(df_format_answer.iloc[:10].values.tolist())
+def serialize_results(reward_dicts: List[dict[str, float]], output_path: str):
+    with open(output_path, "w") as f:
+        json.dump(reward_dicts, f)
 
-print(f"only format correct {df_format.shape[0] / df.shape[0]}")
-print(df_format.iloc[:10].values.tolist())
+def inspect_info_dicts(info_dicts: List[dict[str, float]]):
+    counter = Counter()
+    bad_formats = []
+    bad_answers = []
+    for info_dict in info_dicts:
+        if info_dict["format_reward"] == 1.0 and info_dict["answer_reward"] == 1.0:
+            counter["correct"] += 1
+        elif info_dict["format_reward"] == 1.0 and info_dict["answer_reward"] == 0.0:
+            counter["format_correct_answer_incorrect"] += 1
+            bad_answers.append(info_dict["response"])
+        else:
+            bad_formats.append(info_dict["response"])
+            counter["incorrect"] += 1
+    print(counter)
+    print(bad_formats[:10])
+    print(bad_answers[:10])
 
-print(f"none correct {df_no.shape[0] / df.shape[0]}")
-print(df_no.iloc[:10].values.tolist())
+def main(data_path: str, model_path: str, output_path: str, prompt_path: str):
+    prompts, answers = load_and_format_prompts(data_path, prompt_path)
+    llm, sampling_params = build_llm_and_params(model_path)
+    info_dicts = evaluate_vllm(llm, r1_zero_reward_fn, prompts, answers, sampling_params)
+    inspect_info_dicts(info_dicts)
+    serialize_results(info_dicts, output_path)
+
+if __name__ == "__main__":
+    data_path = "data/MATH/validation.jsonl"
+    model_path = QWEN_BASE_PATH
+
+    prompt_path = "prompts/r1_zero.prompt"
+    output_dir = "results/baseline"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{model_path.split('/')[-1]}_r1_zero.jsonl")
+    main(data_path, model_path, output_path, prompt_path)
