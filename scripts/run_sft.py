@@ -185,9 +185,9 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, default="/data/a5-alignment/models/Qwen2.5-Math-1.5B")
-    parser.add_argument("--train_data_path", type=str, default="/data/a5-alignment/MATH/sft.jsonl")
-    parser.add_argument("--valid_data_path", type=str, default="/data/a5-alignment/MATH/test.jsonl")
+    parser.add_argument("--model_path", type=str, default="Qwen/Qwen2.5-Math-1.5B")
+    parser.add_argument("--train_data_path", type=str, default="data/math/train.jsonl")
+    parser.add_argument("--valid_data_path", type=str, default="data/math/test.jsonl")
     parser.add_argument("--output_dir", type=str, default="/data/ke_wang/sft_checkpoints")
     parser.add_argument("--dataset_size", type=int, default=-1, help="Number of examples to use. -1 for full dataset.")
     parser.add_argument("--filter_correct", action="store_true", help="Filter dataset to only correct examples.")
