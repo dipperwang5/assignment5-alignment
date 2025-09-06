@@ -9,8 +9,6 @@ from tqdm import tqdm
 import wandb
 import torch
 import torch.nn.functional as F
-from einops import rearrange, reduce, repeat
-
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer, PreTrainedModel
 from vllm import LLM, SamplingParams
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
@@ -46,7 +44,6 @@ def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: flo
             gpu_memory_utilization=gpu_memory_utilization,
         )
 
-
 def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM):
     """
     Copied from https://github.com/huggingface/trl/blob/
@@ -55,7 +52,6 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM):
     state_dict = policy.state_dict()
     llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     llm_model.load_weights(state_dict.items())
-
 
 def setup_wandb(experiment_name: str):
     # Setup wandb metrics
@@ -68,7 +64,6 @@ def setup_wandb(experiment_name: str):
     # everything that starts with eval/ is tied to eval_step
     wandb.define_metric("eval/*", step_metric="eval_step")
 
-
 def load_model_and_tokenizer(model_path: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -80,60 +75,71 @@ def load_model_and_tokenizer(model_path: str):
 
     return model, tokenizer
 
-
 def save_model_tokenizer(model, tokenizer, output_dir: str, suffix: str = ""):
     model.save_pretrained(save_directory=f"{output_dir}/{suffix}" if suffix else output_dir)
     tokenizer.save_pretrained(save_directory=f"{output_dir}/{suffix}" if suffix else output_dir)
 
-
 def tokenize_prompt_and_output(prompt_strs: List[str], output_strs: List[str], tokenizer: PreTrainedTokenizer):
-    input_ids_list = []
-    response_mask_list = []
+    tokenized_prompts = tokenizer(prompt_strs, padding=False, add_special_tokens=False)["input_ids"]
+    tokenized_outputs = tokenizer(output_strs, padding=False, add_special_tokens=False)["input_ids"]
 
-    for prompt, output in zip(prompt_strs, output_strs):
-        prompt_enc = tokenizer(prompt, add_special_tokens=False)
-        output_enc = tokenizer(output, add_special_tokens=False)
-        full_input = prompt_enc['input_ids'] + output_enc['input_ids']
-        response_mask = [0] * len(prompt_enc['input_ids']) + [1] * len(output_enc['input_ids'])
-        input_ids_list.append(torch.tensor(full_input, dtype=torch.long))
-        response_mask_list.append(torch.tensor(response_mask, dtype=torch.long))
+    concat_input_ids = []
+    # range of prompt to output (for the labels, so we subtract 1)
+    response_starts = []
+    response_ends = []
+    for tokenized_prompt, tokenized_output in zip(tokenized_prompts, tokenized_outputs):
+        concat_input_ids.append(tokenized_prompt + tokenized_output)
+        response_start = len(tokenized_prompt) - 1
+        response_starts.append(response_start)
+        response_ends.append(response_start + len(tokenized_output) - 1)
 
-    batch_size = len(input_ids_list)
-    max_len = max(len(ids) for ids in input_ids_list)
-    input_ids_batch = torch.full((batch_size, max_len), tokenizer.pad_token_id, dtype=torch.long)
-    response_mask_batch = torch.zeros((batch_size, max_len), dtype=torch.long)
+    max_len = max(len(input_ids) for input_ids in concat_input_ids)
+    for i in range(len(concat_input_ids)):
+        concat_input_ids[i] = concat_input_ids[i] + [tokenizer.pad_token_id] * (max_len - len(concat_input_ids[i]))
 
-    for i, (ids, mask) in enumerate(zip(input_ids_list, response_mask_list)):
-        seq_len = len(ids)
-        input_ids_batch[i, :seq_len] = ids
-        response_mask_batch[i, :seq_len] = mask
+    concat_input_ids = torch.tensor(concat_input_ids)
+    input_ids = concat_input_ids[:, :-1]
+    labels = concat_input_ids[:, 1:]
 
-    return {
-        "input_ids": input_ids_batch[:, :-1],               # (batch, max_len-1)
-        "labels": input_ids_batch[:, 1:],                   # (batch, max_len-1)
-        "response_mask": response_mask_batch[:, 1:]         # (batch, max_len-1)
-    }
+    response_starts = torch.tensor(response_starts).unsqueeze(1)
+    response_ends = torch.tensor(response_ends).unsqueeze(1)
+    positions = torch.arange(max_len - 1).unsqueeze(0)
+    response_mask = (positions >= response_starts) & (positions <= response_ends)
 
+    return {"input_ids": input_ids, "labels": labels, "response_mask": response_mask}
 
 # compute the per-token entropy of the logits
 def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
-    log_normalize_factor = torch.logsumexp(logits, dim=-1, keepdim=True)
-    log_p = logits - log_normalize_factor
-    entropy = -reduce(log_p * torch.exp(log_p), "batch_size seq_len vocab_size -> batch_size seq_len", "sum")
+    log_z = torch.logsumexp(logits, dim=-1)
+    probs = torch.exp(logits - log_z.unsqueeze(-1))
+    entropy = log_z - torch.sum(probs * logits, dim=-1)
     return entropy
 
+def get_response_log_probs(
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    return_token_entropy: bool = False,
+) -> dict[str, torch.Tensor]:
+    output_logits = model(input_ids).logits
+    log_probs = F.log_softmax(output_logits, dim=-1)
+    gathered_log_probs = torch.gather(log_probs, index=labels.unsqueeze(-1), dim=-1).squeeze(-1)
+
+    result_dict = {"log_probs": gathered_log_probs}
+
+    # compute the log_probs
+    if return_token_entropy:
+        result_dict["token_entropy"] = compute_entropy(output_logits)
+
+    return result_dict
 
 def masked_normalize(
     tensor: torch.Tensor,
     mask: torch.Tensor,
-    dim: int | None = None,
-    normalize_constant: float = 1.0,
+    normalize_constant: float,
+    dim: int | None= None,
 ) -> torch.Tensor:
-    tensor_masked = tensor * mask #batch_size seq_len
-    tensor_masked_sum = torch.sum(tensor_masked, dim=dim) # batch_size
-
-    return tensor_masked_sum / normalize_constant
-
+    return torch.sum(torch.where(mask, tensor, torch.zeros_like(tensor)), dim=dim) / normalize_constant
 
 def sft_microbatch_train_step(
     policy_log_probs: torch.Tensor,
@@ -146,7 +152,6 @@ def sft_microbatch_train_step(
     adjusted_normalized_loss.backward()
 
     return adjusted_normalized_loss, {"normalized_loss": normalized_loss}
-
 
 def log_generations(model, vllm, eval_prompts, eval_answers, reward_fn,
                     sampling_params, total_train_steps: int, num_samples: int = 100,
@@ -198,23 +203,7 @@ def log_generations(model, vllm, eval_prompts, eval_answers, reward_fn,
 
     return avg_answer_reward, avg_format_reward
 
-
-def load_stf_data(data_path: str, data_amount: int) -> tuple[List[str], List[str], List[str]]:
-    prompts = []
-    answers = []
-    cots = []
-    with open(data_path, "r") as data_file:
-        for line in data_file:
-            data = json.loads(line)
-            prompts.append(data["prompt"])
-            cots.append(data["response"])
-            answers.append(data["ground_truth"])
-    
-    if data_amount == -1:
-        return prompts, cots, answers
-    else:
-        return prompts[: data_amount], cots[: data_amount], answers[: data_amount]
-
+# before this: set up wandb, model, tokenizer, slice data
 def sft_training_loop(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
@@ -236,14 +225,14 @@ def sft_training_loop(
     half_dataset: bool = False,
     starting_step: int = 0,
 ) -> None:
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     best_eval_reward = 0
     total_train_steps = starting_step
     running_loss = 0
 
-    for epoch in epochs:
+    for epoch in range(epochs):
+        # shuffle the data
         indices = list(range(len(sft_prompts)))
         random.shuffle(indices)
         sft_prompts = [sft_prompts[i] for i in indices]
@@ -257,20 +246,21 @@ def sft_training_loop(
             microbatch_cots = sft_cots[i:i+microbatch_size]
             microbatch_answers = sft_answers[i:i+microbatch_size]
 
-            #log the epoch
+            # log the epoch
             progress_bar.set_description(f"Epoch {epoch}")
 
-            #tokenize the data
+            # tokenize the data
             tokenize_result = tokenize_prompt_and_output(microbatch_prompts, microbatch_cots, tokenizer)
             input_ids = tokenize_result["input_ids"].to(device)
             labels = tokenize_result["labels"].to(device)
             response_mask = tokenize_result["response_mask"].to(device)
 
-            # model response 
+            # model response
             model_output_dict = get_response_log_probs(model, input_ids, labels, return_token_entropy=True)
             policy_log_probs = model_output_dict["log_probs"].to(device)
             token_entropy = model_output_dict["token_entropy"].to(device)
 
+            # loss and train step
             train_loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps)
             running_loss += train_loss.item()
             if microbatch_idx % gradient_accumulation_steps == 0 or microbatch_idx == len(progress_bar) - 1:
@@ -310,6 +300,21 @@ def sft_training_loop(
 
     return total_train_steps
 
+def load_sft_data(data_path: str, data_amount: int) -> tuple[List[str], List[str], List[str]]:
+    prompts = []
+    answers = []
+    cots = []
+    with open(data_path, "r") as data_file:
+        for line in data_file:
+            data = json.loads(line)
+            prompts.append(data["prompt"])
+            cots.append(data["response"])
+            answers.append(data["ground_truth"])
+
+    if data_amount == -1:
+        return prompts, cots, answers
+    else:
+        return prompts[:data_amount], cots[:data_amount], answers[:data_amount]
 
 def main(sft_data_path: str, eval_data_path: str, model_path: str, output_dir: str,
          microbatch_size: int, gradient_accumulation_steps: int, data_amount: int,
