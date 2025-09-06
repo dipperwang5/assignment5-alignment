@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 import torch.nn.functional as F
 
 import pandas as pd
-import mlflow
+# import mlflow
 from transformers import PreTrainedTokenizerBase
 
 from einops import rearrange, reduce, repeat
@@ -236,7 +236,7 @@ def log_generation(
         # log the detailed generation data as a CSV artifact
         df = pd.DataFrame(generations_data)
         df.to_csv("generations.csv", index=False)
-        mlflow.log_artifact("generations.csv", artifact_path="generations")
+        # mlflow.log_artifact("generations.csv", artifact_path="generations")
 
         # log the aggregate metrics
         scalar_metrics = {
@@ -244,7 +244,7 @@ def log_generation(
             "avg_correct_response_length": np.mean(correct_response_lengths) if correct_response_lengths else 0,
             "avg_incorrect_response_length": np.mean(incorrect_response_lengths) if incorrect_response_lengths else 0,
         }
-        mlflow.log_metrics(scalar_metrics)
+        # mlflow.log_metrics(scalar_metrics)
 
     model.train()
 
