@@ -12,10 +12,13 @@ from torch.utils.data import Dataset
 import torch.nn.functional as F
 
 import pandas as pd
+import statistics
 # import mlflow
 from transformers import PreTrainedTokenizerBase
 
 from einops import rearrange, reduce, repeat
+
+import pdb
 
 def run_tokenize_prompt_and_output(
     prompt_strs: list[str],
@@ -111,8 +114,39 @@ def run_compute_group_normalized_rewards(
                 You may choose what you wish to log here
                 (some statistics of the rewards, etc.).
     """
-    raise NotImplementedError
+    # compute rewards
+    rewards_list = []
+    for response, ground_truth in zip(rollout_responses, repeated_ground_truths):
+        rewards_list.append(reward_fn(response, ground_truth)["reward"])
 
+    # compute advantage function
+    normalized_advantages_list = []
+    unnormalized_advantages_list = []
+    
+    # pdb.set_trace()
+    for idx in range(len(rollout_responses) // group_size):
+        group_rewards_list = rewards_list[idx*group_size: (idx+1)*group_size]
+        mean_group_reward = statistics.mean(group_rewards_list)
+        std_group_reward = statistics.stdev(group_rewards_list)
+
+        unnormalized_advantages = [reward - mean_group_reward for reward in group_rewards_list]
+        normalized_advantages = [(reward - mean_group_reward) / (std_group_reward + advantage_eps) for reward in group_rewards_list]
+        
+        unnormalized_advantages_list.extend(unnormalized_advantages)
+        normalized_advantages_list.extend(normalized_advantages)
+
+    # metadata
+    metadata = {
+                "mean_reward": statistics.mean(rewards_list),
+                "std_reward": statistics.stdev(rewards_list),
+                "max_reward": max(rewards_list),
+                "min_reward": min(rewards_list),
+                }
+
+    if normalize_by_std:
+        return torch.Tensor(normalized_advantages_list), torch.Tensor(rewards_list), metadata
+    else:
+        return torch.Tensor(unnormalized_advantages_list), torch.Tensor(rewards_list), metadata
 
 def run_compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     """Get the entropy of the logits (i.e., entropy of the final dimension)."""
