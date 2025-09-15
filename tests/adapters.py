@@ -123,7 +123,6 @@ def run_compute_group_normalized_rewards(
     normalized_advantages_list = []
     unnormalized_advantages_list = []
     
-    # pdb.set_trace()
     for idx in range(len(rollout_responses) // group_size):
         group_rewards_list = rewards_list[idx*group_size: (idx+1)*group_size]
         mean_group_reward = statistics.mean(group_rewards_list)
@@ -299,7 +298,9 @@ def run_compute_naive_policy_gradient_loss(
         torch.Tensor of shape (batch_size, sequence_length): 
             the policy gradient per-token loss.
     """
-    raise NotImplementedError
+    raw_rewards_or_advantages = repeat(raw_rewards_or_advantages, "batch_size 1 -> batch_size (1 seq_len)", seq_len=policy_log_probs.shape[-1])
+
+    return - raw_rewards_or_advantages * policy_log_probs
 
 
 def run_compute_grpo_clip_loss(
