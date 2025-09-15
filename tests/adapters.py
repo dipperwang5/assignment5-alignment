@@ -327,8 +327,20 @@ def run_compute_grpo_clip_loss(
             dict[str, torch.Tensor]: metadata for the GRPO-Clip loss 
                 (used to compute clip fraction).
     """
-    raise NotImplementedError
+    advantages = repeat(advantages, "batch_size 1 -> batch_size (1 seq_len)", seq_len=policy_log_probs.shape[-1])
+    ratio = torch.exp(policy_log_probs - old_log_probs)
+    clipped_ratio = torch.clamp(ratio, min=1-cliprange, max=1+cliprange)
 
+    unclipped_loss = ratio * advantages
+    clipped_loss = clipped_ratio * advantages
+
+    grpo_clipped_loss_per_token = - torch.min(unclipped_loss, clipped_loss)
+
+    metadata = {
+                "token_clipped": (unclipped_loss > clipped_loss),
+                }
+
+    return grpo_clipped_loss_per_token, metadata
 
 def run_compute_policy_gradient_loss(
     policy_log_probs: torch.Tensor,
