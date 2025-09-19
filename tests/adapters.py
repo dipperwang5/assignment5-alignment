@@ -448,7 +448,17 @@ def run_grpo_microbatch_train_step(
         tuple[torch.Tensor, dict[str, torch.Tensor]]: 
             the policy gradient loss and its metadata.
     """
-    raise NotImplementedError
+    batch_size, seq_length = policy_log_probs.shape
+
+    pg_loss, metadata = run_compute_policy_gradient_loss(policy_log_probs, loss_type, \
+                                raw_rewards, advantages, old_log_probs, \
+                                cliprange)
+    loss_mean = run_masked_mean(pg_loss, response_mask, dim=None)
+    loss = loss_mean / gradient_accumulation_steps
+    
+    loss.backward()
+
+    return loss.detach(), metadata
 
 
 def run_masked_normalize(
